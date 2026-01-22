@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Analizador de Sentimientos - IA Avanzada</title>
+    <script src="app.js" defer></script>
+    <link rel="stylesheet" href="style.css">
+
+</head>
+
+<body>
+    <div class="container">
+        <h1>Analizador de sentimientos</h1>
+        <p class="subtitle">Demo académica: consumo de API de NLP</p>
+
+
+        <div class="info-card">
+            <h3>🚀 Backend con IA Avanzada</h3>
+            <p>Este sistema usa modelos de procesamiento de lenguaje natural (NLP) entrenados en millones de textos. El
+                backend procesa las peticiones de forma segura y eficiente.</p>
+        </div>
+
+        <div class="input-group">
+            <label for="modelSelect">🎯 Modelo de IA:</label>
+            <select id="modelSelect">
+                <option value="spanish">RoBERTuito - Español (Recomendado)</option>
+                <option value="multilingual">DistilBERT - Multilingüe</option>
+                <option value="english">DistilBERT - Inglés</option>
+            </select>
+        </div>
+
+        <div class="input-group">
+            <label for="textInput">💬 Texto a analizar:</label>
+            <textarea id="textInput"
+                placeholder="Escribe aquí el texto que quieres analizar...">Hoy tuve un día increíble, todo salió perfecto y estoy muy feliz con los resultados.</textarea>
+        </div>
+
+        <div class="btn-group">
+            <button class="btn" onclick="analyzeSentiment()">
+                🔍 Analizar con IA
+            </button>
+            <button class="btn btn-secondary" onclick="clearAll()">
+                🗑️ Limpiar
+            </button>
+        </div>
+
+        <div class="loading" id="loading">
+            <div class="loading-spinner"></div>
+            <p>Analizando con IA... esto puede tomar unos segundos</p>
+        </div>
+
+        <div class="error" id="error"></div>
+
+        <div class="result" id="result">
+            <div class="emoji" id="emoji"></div>
+            <h3 id="sentimentLabel"></h3>
+            <p id="sentimentText"></p>
+
+            <div class="confidence-bar">
+                <div class="confidence-fill" id="confidenceFill">0%</div>
+            </div>
+
+            <div class="details" id="details"></div>
+        </div>
+    </div>
+
+
+</body>
+
+</html>
