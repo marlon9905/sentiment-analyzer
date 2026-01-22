@@ -1,0 +1,13 @@
+# Node
+**/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables / secrets
+**/.env
+**/.env.*
+
+# OS / editor
+.DS_Store
+.vscode/
