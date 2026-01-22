@@ -1,16 +1,19 @@
+// backend/server.js
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(express.json());
-app.use(express.static('../frontend'));
+app.use(express.json({ limit: '32kb' })); // evita payloads enormes
+app.use(express.static(path.join(__dirname, '..', 'frontend')));
 
-const HUGGING_FACE_API_KEY = process.env.HUGGING_FACE_API_KEY || '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';
+// IMPORTANTE: NO hardcodear tokens
+const HUGGING_FACE_API_KEY = process.env.HUGGING_FACE_API_KEY;
 
 // Modelos de Hugging Face (intentaremos usarlos primero)
 const HF_MODELS = {
@@ -19,7 +22,7 @@ const HF_MODELS = {
   english: 'cardiffnlp/twitter-roberta-base-sentiment-latest'
 };
 
-// Diccionarios mejorados para análisis local
+// Diccionarios para análisis local
 const PALABRAS_SENTIMIENTO = {
   positivas: [
     'feliz', 'alegre', 'excelente', 'bueno', 'genial', 'perfecto', 'increíble',
@@ -37,96 +40,151 @@ const PALABRAS_SENTIMIENTO = {
     'deprimente', 'aburrido', 'cansado', 'enfermo', 'preocupado', 'miedo',
     'ansiedad', 'desastre', 'fracaso', 'lamentable', 'insoportable', 'mierda',
     'porquería', 'basura', 'asco', 'disgusto', 'desagradable', 'inútil',
-    'deficiente', 'defectuoso', 'feo', 'detestable', 'patético', 'miserable', 'jueputa', 'perra', 'maldito', 'triplejuputa', 'cabronazo', 
-    'hijo de la gran puta', 'chingada', 'chingar', 'pinche', 'culero', 'culiada', 'zorra', 'puta'
+    'deficiente', 'defectuoso', 'feo', 'detestable', 'patético', 'miserable',
+    // lenguaje coloquial/insultos (nota: ver detección de frases abajo)
+    'jueputa', 'perra', 'maldito', 'triplejuputa', 'cabronazo', 'chingada',
+    'chingar', 'pinche', 'culero', 'culiada', 'zorra', 'puta',
+    'hijo de la gran puta'
   ],
   intensificadores: [
-    'muy', 'demasiado', 'extremadamente', 'súper', 'ultra', 'totalmente',
+    'muy', 'demasiado', 'extremadamente', 'súper', 'super', 'ultra', 'totalmente',
     'completamente', 'absolutamente', 'increíblemente', 'bastante', 'realmente',
     'verdaderamente', 'sumamente', 'altamente', 'excesivamente'
   ],
   negadores: [
-    'no', 'nunca', 'jamás', 'tampoco', 'ningún', 'ninguno', 'nada', 'nadie'
+    'no', 'nunca', 'jamás', 'jamas', 'tampoco', 'ningún', 'ningun', 'ninguno', 'nada', 'nadie'
   ]
 };
 
-// Endpoint principal de análisis con fallback
+// ============================
+// Utilidades de normalización
+// ============================
+
+// Normaliza texto (minúsculas y espacios) para detectar frases
+function normalizeForPhraseMatch(text) {
+  return (text || '')
+    .toLowerCase()
+    .replace(/[“”"'.!,;:()¿?¡]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Tokeniza: quita puntuación simple, conserva letras/números/acentos
+function tokenize(text) {
+  const cleaned = (text || '')
+    .toLowerCase()
+    .replace(/[“”"'.!,;:()¿?¡]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return cleaned ? cleaned.split(' ') : [];
+}
+
+// Normalizar etiquetas HF
+function normalizeSentiment(label) {
+  const labelLower = (label || '').toLowerCase();
+
+  if (labelLower.includes('pos') || labelLower === 'positive') return 'positive';
+  if (labelLower.includes('neg') || labelLower === 'negative') return 'negative';
+  if (labelLower.includes('neu') || labelLower === 'neutral') return 'neutral';
+
+  return 'neutral';
+}
+
+// ============================
+// Endpoint principal
+// ============================
+
 app.post('/api/analyze', async (req, res) => {
   try {
     const { text, model = 'spanish' } = req.body;
 
-    if (!text) {
-      return res.status(400).json({ 
-        error: 'El campo "text" es requerido' 
-      });
+    if (!text || typeof text !== 'string') {
+      return res.status(400).json({ error: 'El campo "text" (string) es requerido' });
     }
 
-    console.log(`Analizando: "${text.substring(0, 50)}..."`);
-
-    // Intentar con Hugging Face primero
-    try {
-      const hfResult = await analyzeWithHuggingFace(text, model);
-      return res.json(hfResult);
-    } catch (hfError) {
-      console.log('Hugging Face no disponible, usando análisis local avanzado');
-      
-      // Fallback a análisis local mejorado
-      const localResult = analyzeLocally(text, model);
-      return res.json(localResult);
+    // Intentar con Hugging Face si hay key
+    if (HUGGING_FACE_API_KEY) {
+      try {
+        const hfResult = await analyzeWithHuggingFace(text, model);
+        return res.json(hfResult);
+      } catch (hfError) {
+        // Fallback local si HF falla
+        const localResult = analyzeLocally(text, model, {
+          warning: `Fallback local: Hugging Face falló (${safeErr(hfError)})`
+        });
+        return res.json(localResult);
+      }
     }
+
+    // Si no hay key, usar local con aviso explícito
+    const localResult = analyzeLocally(text, model, {
+      warning: 'HUGGING_FACE_API_KEY no configurada: usando análisis local'
+    });
+    return res.json(localResult);
 
   } catch (error) {
-    console.error('Error general:', error.message);
     res.status(500).json({
       error: 'Error interno del servidor',
-      message: error.message
+      message: safeErr(error)
     });
   }
 });
 
-// Análisis con Hugging Face
+function safeErr(err) {
+  return (err && err.message) ? err.message : String(err);
+}
+
+// ============================
+// Hugging Face
+// ============================
+
 async function analyzeWithHuggingFace(text, model) {
   const selectedModel = HF_MODELS[model] || HF_MODELS.spanish;
-  
+
   const response = await axios.post(
     `https://api-inference.huggingface.co/models/${selectedModel}`,
-    { 
+    {
       inputs: text,
       options: { wait_for_model: true }
     },
     {
       headers: {
-        'Authorization': `Bearer ${HUGGING_FACE_API_KEY}`,
+        Authorization: `Bearer ${HUGGING_FACE_API_KEY}`,
         'Content-Type': 'application/json'
       },
       timeout: 15000
     }
   );
 
-  const results = Array.isArray(response.data[0]) ? response.data[0] : response.data;
-  
+  const results = Array.isArray(response.data?.[0]) ? response.data[0] : response.data;
+
   let maxScore = -1;
   let topSentiment = null;
 
-  results.forEach(item => {
-    if (item.score > maxScore) {
+  (results || []).forEach(item => {
+    if (item?.score > maxScore) {
       maxScore = item.score;
       topSentiment = item;
     }
   });
 
+  if (!topSentiment) {
+    throw new Error('Respuesta inválida de Hugging Face');
+  }
+
   const sentiment = normalizeSentiment(topSentiment.label);
 
   return {
     success: true,
-    text: text,
+    text,
     model: selectedModel,
     source: 'Hugging Face API',
     analysis: {
-      sentiment: sentiment,
+      sentiment,
       confidence: (maxScore * 100).toFixed(2),
       label: topSentiment.label,
-      allScores: results.map(r => ({
+      allScores: (results || []).map(r => ({
         label: r.label,
         score: (r.score * 100).toFixed(2)
       }))
@@ -135,69 +193,99 @@ async function analyzeWithHuggingFace(text, model) {
   };
 }
 
-// Análisis local mejorado (SIEMPRE FUNCIONA)
-function analyzeLocally(text, model) {
-  const textoLower = text.toLowerCase();
-  const palabras = textoLower.split(/\s+/);
-  
+// ============================
+// Análisis local (corregido)
+// ============================
+
+function analyzeLocally(text, model, opts = {}) {
+  const tokens = tokenize(text);
+  const normalizedPhraseText = normalizeForPhraseMatch(text);
+
+  // Ventana de negación (N tokens siguientes)
+  const NEGATION_WINDOW = 2;
+  let negationScope = 0;
+
   let scorePositivo = 0;
   let scoreNegativo = 0;
-  let multiplicador = 1;
-  let negacionActiva = false;
-  
-  const palabrasDetectadas = {
+
+  let multiplier = 1;
+
+  const detected = {
     positivas: [],
     negativas: [],
     intensificadores: [],
-    negadores: []
+    negadores: [],
+    frasesNegativas: []
   };
 
-  // Análisis palabra por palabra con contexto
-  palabras.forEach((palabra, index) => {
-    // Detectar negadores
+  // Detección simple de frases negativas (si están en la lista)
+  // Nota: esto suma 1 vez por frase encontrada (no por token).
+  // Evita duplicar si ya se contará por tokens.
+  const negativePhrases = PALABRAS_SENTIMIENTO.negativas.filter(w => w.includes(' '));
+  for (const phrase of negativePhrases) {
+    if (normalizedPhraseText.includes(phrase)) {
+      scoreNegativo += 1.5; // ponderación ligera por frase
+      detected.frasesNegativas.push(phrase);
+    }
+  }
+
+  for (let i = 0; i < tokens.length; i++) {
+    const palabra = tokens[i];
+
+    // Activar negación
     if (PALABRAS_SENTIMIENTO.negadores.includes(palabra)) {
-      negacionActiva = true;
-      palabrasDetectadas.negadores.push(palabra);
-      setTimeout(() => negacionActiva = false, 2); // Afecta las próximas 2 palabras
+      negationScope = NEGATION_WINDOW;
+      detected.negadores.push(palabra);
+      continue;
     }
 
-    // Detectar intensificadores
+    const negacionActiva = negationScope > 0;
+
+    // Intensificadores (aplican al siguiente match pos/neg)
     if (PALABRAS_SENTIMIENTO.intensificadores.includes(palabra)) {
-      multiplicador = 1.5;
-      palabrasDetectadas.intensificadores.push(palabra);
+      multiplier = 1.5;
+      detected.intensificadores.push(palabra);
+
+      // disminuir scope de negación aunque sea intensificador
+      if (negationScope > 0) negationScope--;
+      continue;
     }
 
-    // Detectar palabras positivas
+    // Match por inclusión (conserva tu enfoque original), pero sobre token limpio
     const esPositiva = PALABRAS_SENTIMIENTO.positivas.some(p => palabra.includes(p));
+    const esNegativa = PALABRAS_SENTIMIENTO.negativas
+      .filter(w => !w.includes(' '))
+      .some(p => palabra.includes(p));
+
     if (esPositiva) {
-      const puntos = 1 * multiplicador;
+      const points = 1 * multiplier;
       if (negacionActiva) {
-        scoreNegativo += puntos;
-        palabrasDetectadas.negativas.push(palabra);
+        scoreNegativo += points;
+        detected.negativas.push(palabra);
       } else {
-        scorePositivo += puntos;
-        palabrasDetectadas.positivas.push(palabra);
+        scorePositivo += points;
+        detected.positivas.push(palabra);
       }
-      multiplicador = 1;
+      multiplier = 1;
+    } else if (esNegativa) {
+      const points = 1 * multiplier;
+      if (negacionActiva) {
+        scorePositivo += points;
+        detected.positivas.push(palabra);
+      } else {
+        scoreNegativo += points;
+        detected.negativas.push(palabra);
+      }
+      multiplier = 1;
     }
 
-    // Detectar palabras negativas
-    const esNegativa = PALABRAS_SENTIMIENTO.negativas.some(p => palabra.includes(p));
-    if (esNegativa) {
-      const puntos = 1 * multiplicador;
-      if (negacionActiva) {
-        scorePositivo += puntos;
-        palabrasDetectadas.positivas.push(palabra);
-      } else {
-        scoreNegativo += puntos;
-        palabrasDetectadas.negativas.push(palabra);
-      }
-      multiplicador = 1;
-    }
-  });
+    // Consumir ventana de negación al final del token
+    if (negationScope > 0) negationScope--;
+  }
 
   // Calcular sentimiento final
   const total = scorePositivo + scoreNegativo;
+
   let sentiment;
   let confidence;
 
@@ -206,13 +294,13 @@ function analyzeLocally(text, model) {
     confidence = 60;
   } else {
     const ratioPositivo = scorePositivo / total;
-    
+
     if (ratioPositivo > 0.65) {
       sentiment = 'positive';
-      confidence = Math.min(95, 60 + (ratioPositivo * 40));
+      confidence = Math.min(95, 60 + ratioPositivo * 40);
     } else if (ratioPositivo < 0.35) {
       sentiment = 'negative';
-      confidence = Math.min(95, 60 + ((1 - ratioPositivo) * 40));
+      confidence = Math.min(95, 60 + (1 - ratioPositivo) * 40);
     } else {
       sentiment = 'neutral';
       confidence = 60 + Math.abs(ratioPositivo - 0.5) * 20;
@@ -221,11 +309,12 @@ function analyzeLocally(text, model) {
 
   return {
     success: true,
-    text: text,
-    model: 'Análisis Local Avanzado con NLP',
+    text,
+    model: 'Análisis Local Avanzado (heurístico)',
     source: 'Local Processing Engine',
+    warning: opts.warning,
     analysis: {
-      sentiment: sentiment,
+      sentiment,
       confidence: confidence.toFixed(2),
       label: sentiment.charAt(0).toUpperCase() + sentiment.slice(1),
       allScores: [
@@ -234,53 +323,40 @@ function analyzeLocally(text, model) {
         { label: 'Neutral', score: (total === 0 ? 100 : 0).toFixed(2) }
       ],
       details: {
-        positiveWords: palabrasDetectadas.positivas.length,
-        negativeWords: palabrasDetectadas.negativas.length,
-        intensifiers: palabrasDetectadas.intensificadores.length,
-        negations: palabrasDetectadas.negadores.length,
-        detectedWords: palabrasDetectadas
+        positiveWords: detected.positivas.length,
+        negativeWords: detected.negativas.length,
+        intensifiers: detected.intensificadores.length,
+        negations: detected.negadores.length,
+        detectedWords: detected
       }
     },
     timestamp: new Date().toISOString()
   };
 }
 
-// Normalizar etiquetas
-function normalizeSentiment(label) {
-  const labelLower = label.toLowerCase();
-  
-  if (labelLower.includes('pos') || labelLower === 'positive') return 'positive';
-  if (labelLower.includes('neg') || labelLower === 'negative') return 'negative';
-  if (labelLower.includes('neu') || labelLower === 'neutral') return 'neutral';
-  
-  return 'neutral';
-}
+// ============================
+// Batch (local)
+// ============================
 
-// Endpoint para análisis por lotes
-app.post('/api/analyze-batch', async (req, res) => {
+app.post('/api/analyze-batch', (req, res) => {
   try {
     const { texts, model = 'spanish' } = req.body;
 
     if (!texts || !Array.isArray(texts)) {
-      return res.status(400).json({ 
-        error: 'El campo "texts" debe ser un array' 
-      });
+      return res.status(400).json({ error: 'El campo "texts" debe ser un array' });
     }
 
-    const results = texts.map(text => {
+    const results = texts.map(t => {
       try {
-        return analyzeLocally(text, model);
-      } catch (error) {
-        return {
-          text: text,
-          error: error.message
-        };
+        return analyzeLocally(String(t || ''), model);
+      } catch (e) {
+        return { text: t, error: safeErr(e) };
       }
     });
 
     res.json({
       success: true,
-      results: results,
+      results,
       total: texts.length,
       timestamp: new Date().toISOString()
     });
@@ -288,62 +364,36 @@ app.post('/api/analyze-batch', async (req, res) => {
   } catch (error) {
     res.status(500).json({
       error: 'Error en análisis por lotes',
-      message: error.message
+      message: safeErr(error)
     });
   }
 });
 
-// Endpoint de modelos
+// Modelos
 app.get('/api/models', (req, res) => {
   res.json({
     models: [
-      {
-        id: 'spanish',
-        name: 'Análisis en Español',
-        description: 'Optimizado para español con detección avanzada'
-      },
-      {
-        id: 'multilingual',
-        name: 'Multilingüe',
-        description: 'Soporta múltiples idiomas'
-      },
-      {
-        id: 'english',
-        name: 'Inglés',
-        description: 'Optimizado para inglés'
-      }
+      { id: 'spanish', name: 'Análisis en Español', description: 'Optimizado para español' },
+      { id: 'multilingual', name: 'Multilingüe', description: 'Soporta múltiples idiomas' },
+      { id: 'english', name: 'Inglés', description: 'Optimizado para inglés' }
     ]
   });
 });
 
-// Endpoint de salud
+// Health
 app.get('/api/health', (req, res) => {
-  res.json({ 
+  res.json({
     status: 'OK',
-    engine: 'Local NLP + Hugging Face Fallback',
+    engine: 'Local NLP + Hugging Face (si está configurado)',
+    hf_enabled: Boolean(HUGGING_FACE_API_KEY),
     timestamp: new Date().toISOString(),
-    version: '2.0.0'
+    version: '2.1.0'
   });
 });
 
-// Iniciar servidor
+// Start
 app.listen(PORT, () => {
-  console.log(`
-╔═══════════════════════════════════════════╗
-║  🤖 Analizador de Sentimientos con IA     ║
-║     (Motor Híbrido - Siempre Disponible)  ║
-╚═══════════════════════════════════════════╝
-
-🚀 Servidor: http://localhost:${PORT}
-📊 API: http://localhost:${PORT}/api
-🏥 Health: http://localhost:${PORT}/api/health
-
-✨ Características:
-   • Análisis local avanzado (siempre disponible)
-   • Fallback automático a Hugging Face
-   • Detección de negaciones e intensificadores
-   • Soporte para groserías y lenguaje coloquial
-
-Presiona Ctrl+C para detener
-  `);
+  console.log(`Servidor: http://localhost:${PORT}`);
+  console.log(`API:      http://localhost:${PORT}/api`);
+  console.log(`Health:   http://localhost:${PORT}/api/health`);
 });
